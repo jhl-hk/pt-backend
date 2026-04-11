@@ -2,6 +2,8 @@ package handler
 
 import (
 	"bufio"
+	"bytes"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -35,9 +37,17 @@ func LoadASNs(path string) (map[int]bool, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return loadASNs(f)
+}
 
+// LoadASNsFromBytes parses a BIRD-style ASN filter from raw bytes.
+func LoadASNsFromBytes(data []byte) (map[int]bool, error) {
+	return loadASNs(bytes.NewReader(data))
+}
+
+func loadASNs(r io.Reader) (map[int]bool, error) {
 	asns := make(map[int]bool)
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
 		// Skip header and closing lines.
@@ -73,11 +83,19 @@ func ParsePrefixPaths(outputPath string, asns map[int]bool) ([]PrefixPath, error
 		return nil, err
 	}
 	defer f.Close()
+	return parsePrefixPaths(f, asns)
+}
 
+// ParsePrefixPathsFromBytes parses a BIRD routing table dump from raw bytes.
+func ParsePrefixPathsFromBytes(data []byte, asns map[int]bool) ([]PrefixPath, error) {
+	return parsePrefixPaths(bytes.NewReader(data), asns)
+}
+
+func parsePrefixPaths(r io.Reader, asns map[int]bool) ([]PrefixPath, error) {
 	var results []PrefixPath
 	var currentPrefix string
 
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
@@ -165,6 +183,11 @@ func buildPath(pathStr string, asns map[int]bool) []int {
 		} else {
 			hasUnknown = true
 		}
+	}
+
+	// If the origin (last ASN) is itself a Tier1, the path is just that Tier1.
+	if lastKnown != -1 && Tier1ASNs[lastKnown] {
+		return []int{lastKnown}
 	}
 
 	if hasUnknown {
