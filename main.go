@@ -23,7 +23,8 @@ import (
 )
 
 func main() {
-	if err := godotenv.Load(); err != nil {
+	// Load .env if present; fall back to environment variables silently.
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
 		log.Fatalf("load .env: %v", err)
 	}
 
