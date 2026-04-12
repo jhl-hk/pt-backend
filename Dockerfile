@@ -6,7 +6,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o pt-backend ./
 
-FROM alpine:3.21
+FROM golang:1.26-alpine
 RUN apk add --no-cache ca-certificates openssh-client && \
     mkdir -p /root/.ssh && \
     chmod 700 /root/.ssh && \
