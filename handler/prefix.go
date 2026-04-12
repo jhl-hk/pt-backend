@@ -249,9 +249,9 @@ func buildPath(pathStr string, asns map[int]bool) []int {
 		return []int{0, lastKnown}
 	}
 
-	// If another Tier1 follows 215172, the last Tier1 in the path is the
-	// relevant entry point; drop 215172 and any earlier Tier1s from the front.
-	if len(deduped) >= 2 && deduped[0] == RootASN {
+	// If the path starts with any Tier1 (including RootASN), the last Tier1
+	// in the path is the relevant entry point; collapse earlier Tier1 hops.
+	if len(deduped) >= 2 && Tier1ASNs[deduped[0]] {
 		lastT1Idx := -1
 		for i, asn := range deduped[1:] {
 			if Tier1ASNs[asn] {

@@ -113,29 +113,59 @@ func main() {
 	srv := web.NewServer(handler.IndexByASN(paths), bunDB)
 	log.Println("route index ready")
 
-	// syncRipeDB fetches RIPE DB, updates srv orgMap and DB org columns.
+	// syncRipeDB fetches APNIC + ARIN + RIPE DBs, merges them
+	// (priority: APNIC < ARIN < RIPE), and updates srv orgMap and DB.
 	syncRipeDB := func() {
-		log.Println("syncing RIPE DB...")
-		orgMap, err := handler.LoadRipeOrgMap(asns)
+		log.Println("syncing IRR databases (APNIC + ARIN + RIPE)...")
+
+		orgMap := make(map[int]handler.OrgInfo)
+
+		apnicMap, err := handler.LoadAPNICOrgMap(asns)
+		if err != nil {
+			log.Printf("apnic db load failed: %v", err)
+		} else {
+			for asn, info := range apnicMap {
+				orgMap[asn] = info
+			}
+			log.Printf("APNIC DB loaded: %d entries", len(apnicMap))
+		}
+
+		arinMap, err := handler.LoadARINOrgMap(asns)
+		if err != nil {
+			log.Printf("arin db load failed: %v", err)
+		} else {
+			for asn, info := range arinMap {
+				orgMap[asn] = info
+			}
+			log.Printf("ARIN DB loaded: %d entries", len(arinMap))
+		}
+
+		ripeMap, err := handler.LoadRipeOrgMap(asns)
 		if err != nil {
 			log.Printf("ripe db sync failed: %v", err)
-			return
-		}
-		srv.SetOrgMap(orgMap)
-		log.Printf("RIPE DB loaded: %d entries", len(orgMap))
-
-		records := make([]db.ASNRecord, 0, len(asns))
-		for asn := range asns {
-			rec := db.ASNRecord{ID: asn, UpdatedAt: time.Now()}
-			if info, ok := orgMap[asn]; ok {
-				rec.Country = info.Country
-				rec.Org = info.Handle
-				rec.OrgName = info.Name
-				rec.SponsorOrg = info.SponsorHandle
-				rec.SponsorName = info.SponsorName
-				rec.Whois = info.Whois
+		} else {
+			for asn, info := range ripeMap {
+				orgMap[asn] = info
 			}
-			records = append(records, rec)
+			log.Printf("RIPE DB loaded: %d entries", len(ripeMap))
+		}
+
+		srv.SetOrgMap(orgMap)
+		log.Printf("IRR sync done: %d total entries", len(orgMap))
+
+		// Only upsert ASNs that have IRR data — never overwrite with empty values.
+		records := make([]db.ASNRecord, 0, len(orgMap))
+		for asn, info := range orgMap {
+			records = append(records, db.ASNRecord{
+				ID:          asn,
+				Country:     info.Country,
+				Org:         info.Handle,
+				OrgName:     info.Name,
+				SponsorOrg:  info.SponsorHandle,
+				SponsorName: info.SponsorName,
+				Whois:       info.Whois,
+				UpdatedAt:   time.Now(),
+			})
 		}
 		if err := db.UpsertASNs(ctx, bunDB, records); err != nil {
 			log.Printf("upsert asns: %v", err)
@@ -176,12 +206,36 @@ func main() {
 		}
 	}()
 
-	// Daily at 00:00: re-sync RIPE DB.
+	// Daily at 00:00: re-sync IRR databases + update BIRD ASN list.
 	go func() {
 		for {
 			now := time.Now()
 			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
 			time.Sleep(time.Until(next))
+
+			log.Println("daily: running update-moedove.sh on router...")
+			if _, err := client.Run("sudo /etc/bird/update-moedove.sh"); err != nil {
+				log.Printf("daily: update-moedove.sh failed: %v", err)
+			}
+
+			// Re-fetch updated ASN list.
+			newAsnsData, err := client.Run("sudo cat /etc/bird/as_moedove_asns.conf")
+			if err != nil {
+				log.Printf("daily: fetch asns failed: %v", err)
+			} else {
+				if newAsns, err := handler.LoadASNsFromBytes(newAsnsData); err != nil {
+					log.Printf("daily: parse asns failed: %v", err)
+				} else {
+					asns = newAsns
+					log.Printf("daily: asns updated: %d entries", len(asns))
+				}
+			}
+
+			// Delete cached IRR files so they are re-downloaded fresh.
+			for _, f := range []string{"temp/ripe.db.gz", "temp/arin.db.gz", "temp/apnic.db.aut-num.gz", "temp/apnic.db.organisation.gz"} {
+				os.Remove(f)
+			}
+
 			syncRipeDB()
 		}
 	}()
@@ -193,7 +247,7 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", mux))
 }
 
-var collectors = []string{"as211575", "as215172", "as213605", "as139317"}
+var collectors = []string{"as211575", "as215172", "as213605", "as139317", "as51087"}
 
 var feedCmds = func() []string {
 	cmds := make([]string, len(collectors))

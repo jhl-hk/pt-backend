@@ -15,6 +15,9 @@ import (
 )
 
 const RipeDBURL = "https://ftp.ripe.net/ripe/dbase/ripe.db.gz"
+const ARINDbURL = "https://ftp.arin.net/pub/rr/arin.db.gz"
+const APNICAutNumURL = "https://ftp.apnic.net/apnic/whois/apnic.db.aut-num.gz"
+const APNICOrgURL = "https://ftp.apnic.net/apnic/whois/apnic.db.organisation.gz"
 
 // OrgInfo holds the org handle and name for an ASN.
 type OrgInfo struct {
@@ -27,12 +30,87 @@ type OrgInfo struct {
 }
 
 const localRipeDB = "temp/ripe.db.gz"
+const localARINDB = "temp/arin.db.gz"
+const localAPNICAutNum = "temp/apnic.db.aut-num.gz"
+const localAPNICOrg = "temp/apnic.db.organisation.gz"
 
-// LoadRipeOrgMap uses ./ripe.db.gz if it exists, otherwise downloads it to a
-// temp file (deleted after parsing). Only ASNs present in the filter set are
-// returned; pass nil to return all.
+// LoadRipeOrgMap uses temp/ripe.db.gz if it exists, otherwise downloads it.
+// Only ASNs present in the filter set are returned; pass nil to return all.
 func LoadRipeOrgMap(filter map[int]bool) (map[int]OrgInfo, error) {
-	path, downloaded, err := resolveRipeDB()
+	return loadIRROrgMap(localRipeDB, RipeDBURL, "ripe.db", filter)
+}
+
+// LoadARINOrgMap uses temp/arin.db.gz if it exists, otherwise downloads it.
+// Only ASNs present in the filter set are returned; pass nil to return all.
+func LoadARINOrgMap(filter map[int]bool) (map[int]OrgInfo, error) {
+	return loadIRROrgMap(localARINDB, ARINDbURL, "arin.db", filter)
+}
+
+// LoadAPNICOrgMap loads APNIC aut-num and organisation files, combines them,
+// and returns an ASN→OrgInfo map. APNIC splits data by object type, so both
+// files are needed: aut-num provides ASN→org mappings, organisation provides
+// org handle→name/country. Uses local temp files if present, downloads otherwise.
+func LoadAPNICOrgMap(filter map[int]bool) (map[int]OrgInfo, error) {
+	autNumPath, autNumDownloaded, err := resolveDB(localAPNICAutNum, APNICAutNumURL, "apnic.db.aut-num")
+	if err != nil {
+		return nil, err
+	}
+	if autNumDownloaded {
+		defer os.Remove(autNumPath)
+	}
+
+	orgPath, orgDownloaded, err := resolveDB(localAPNICOrg, APNICOrgURL, "apnic.db.organisation")
+	if err != nil {
+		return nil, err
+	}
+	if orgDownloaded {
+		defer os.Remove(orgPath)
+	}
+
+	readers, closers, err := openGzipFiles(autNumPath, orgPath)
+	if err != nil {
+		return nil, fmt.Errorf("open apnic files: %w", err)
+	}
+	defer func() {
+		for _, c := range closers {
+			c()
+		}
+	}()
+
+	// Parse both files as one combined RPSL stream.
+	return parseRipeDB(io.MultiReader(readers...), filter)
+}
+
+// openGzipFiles opens multiple gzip files and returns their readers and
+// closer functions (call each closer when done).
+func openGzipFiles(paths ...string) ([]io.Reader, []func(), error) {
+	readers := make([]io.Reader, 0, len(paths))
+	closers := make([]func(), 0, len(paths))
+	for _, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			for _, c := range closers {
+				c()
+			}
+			return nil, nil, err
+		}
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			f.Close()
+			for _, c := range closers {
+				c()
+			}
+			return nil, nil, err
+		}
+		readers = append(readers, gz)
+		closers = append(closers, func() { gz.Close(); f.Close() })
+	}
+	return readers, closers, nil
+}
+
+// loadIRROrgMap is the generic loader for any gzip RPSL-format IRR database.
+func loadIRROrgMap(localPath, downloadURL, label string, filter map[int]bool) (map[int]OrgInfo, error) {
+	path, downloaded, err := resolveDB(localPath, downloadURL, label)
 	if err != nil {
 		return nil, err
 	}
@@ -42,56 +120,56 @@ func LoadRipeOrgMap(filter map[int]bool) (map[int]OrgInfo, error) {
 
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open ripe db: %w", err)
+		return nil, fmt.Errorf("open %s: %w", label, err)
 	}
 	defer f.Close()
 
 	gz, err := gzip.NewReader(f)
 	if err != nil {
-		return nil, fmt.Errorf("open gzip: %w", err)
+		return nil, fmt.Errorf("open gzip %s: %w", label, err)
 	}
 	defer gz.Close()
 
 	return parseRipeDB(gz, filter)
 }
 
-// resolveRipeDB returns the path to a ripe.db.gz file.
-// If ./ripe.db.gz already exists it is used directly (downloaded=false).
-// Otherwise the file is downloaded to a temp path (downloaded=true).
-func resolveRipeDB() (path string, downloaded bool, err error) {
-	if _, err := os.Stat(localRipeDB); err == nil {
-		log.Printf("using existing %s", localRipeDB)
-		return localRipeDB, false, nil
+// resolveDB returns the path to an IRR DB gzip file.
+// If localPath already exists it is used directly; otherwise the file is
+// downloaded from downloadURL to a temp path.
+func resolveDB(localPath, downloadURL, label string) (path string, downloaded bool, err error) {
+	if _, err := os.Stat(localPath); err == nil {
+		log.Printf("using existing %s", localPath)
+		return localPath, false, nil
 	}
-	tmp, err := downloadToTemp()
+	tmp, err := downloadToTemp(downloadURL, label)
 	if err != nil {
 		return "", false, err
 	}
 	return tmp, true, nil
 }
 
-// downloadToTemp streams the RIPE DB gzip to a temp file and returns its path.
-func downloadToTemp() (string, error) {
-	resp, err := http.Get(RipeDBURL)
+// downloadToTemp streams an IRR DB gzip from url to a temp file.
+func downloadToTemp(url, label string) (string, error) {
+	resp, err := http.Get(url)
 	if err != nil {
-		return "", fmt.Errorf("download ripe.db.gz: %w", err)
+		return "", fmt.Errorf("download %s: %w", label, err)
 	}
 	defer resp.Body.Close()
 
-	total := resp.ContentLength // -1 if unknown
+	total := resp.ContentLength
 
-	tmp, err := os.CreateTemp("temp", "ripe.db.*.gz")
+	tmp, err := os.CreateTemp("temp", label+".*.gz")
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
 	}
 
-	pr := &progressReader{r: resp.Body, total: total}
+	pr := &progressReader{r: resp.Body, total: total, label: label}
 	if _, err := io.Copy(tmp, pr); err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
 		return "", fmt.Errorf("write temp file: %w", err)
 	}
-	log.Printf("ripe.db download complete: %.1f MB", float64(pr.written)/(1024*1024))
+	log.Printf("%s download complete: %.1f MB", label, float64(pr.written)/(1024*1024))
 
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmp.Name())
@@ -108,6 +186,7 @@ type progressReader struct {
 	total      int64
 	written    int64
 	lastLogged int64
+	label      string
 }
 
 func (p *progressReader) Read(buf []byte) (int, error) {
@@ -116,12 +195,12 @@ func (p *progressReader) Read(buf []byte) (int, error) {
 	if p.written-p.lastLogged >= progressInterval {
 		p.lastLogged = p.written
 		if p.total > 0 {
-			log.Printf("ripe.db downloading... %.1f / %.1f MB (%.0f%%)",
+			log.Printf("%s downloading... %.1f / %.1f MB (%.0f%%)", p.label,
 				float64(p.written)/(1024*1024),
 				float64(p.total)/(1024*1024),
 				float64(p.written)/float64(p.total)*100)
 		} else {
-			log.Printf("ripe.db downloading... %.1f MB", float64(p.written)/(1024*1024))
+			log.Printf("%s downloading... %.1f MB", p.label, float64(p.written)/(1024*1024))
 		}
 	}
 	return n, err
@@ -130,7 +209,10 @@ func (p *progressReader) Read(buf []byte) (int, error) {
 // blockResult is the output from a single parsed RIPE DB block.
 type blockResult struct {
 	asn        int    // > 0 for aut-num blocks
-	org        string // org handle referenced by this ASN
+	org        string // org handle referenced by this ASN (RIPE/APNIC style)
+	mntBy      string // mnt-by handle (ARIN: derive org by replacing MNT- → ARIN-)
+	asName     string // as-name field (ARIN style fallback)
+	descr      string // descr field (ARIN style fallback for org name)
 	country    string // country code from aut-num block
 	sponsorOrg string // sponsoring-org handle (aut-num blocks)
 	whois      string // raw block text (aut-num blocks)
@@ -202,6 +284,8 @@ func parseRipeDB(r io.Reader, filter map[int]bool) (map[int]OrgInfo, error) {
 	// --- Collector ---
 	type asnEntry struct {
 		org        string
+		asName     string // fallback when no org: (ARIN style)
+		descr      string // fallback name when no org: (ARIN style)
 		country    string
 		sponsorOrg string
 		whois      string
@@ -209,8 +293,16 @@ func parseRipeDB(r io.Reader, filter map[int]bool) (map[int]OrgInfo, error) {
 	autNumOrg := make(map[int]asnEntry) // asn -> org/sponsor/whois
 	orgNames := make(map[string]string) // org handle -> org-name
 	for res := range results {
-		if res.asn > 0 && res.org != "" && (filter == nil || filter[res.asn]) {
-			autNumOrg[res.asn] = asnEntry{org: res.org, country: res.country, sponsorOrg: res.sponsorOrg, whois: res.whois}
+		if res.asn > 0 && (res.org != "" || res.asName != "") && (filter == nil || filter[res.asn]) {
+			org := res.org
+			// ARIN: derive org handle from mnt-by (MNT-XXX → ARIN-XXX).
+			if org == "" && strings.HasPrefix(res.mntBy, "MNT-") {
+				org = "ARIN-" + res.mntBy[len("MNT-"):]
+			}
+			autNumOrg[res.asn] = asnEntry{
+				org: org, asName: res.asName, descr: res.descr,
+				country: res.country, sponsorOrg: res.sponsorOrg, whois: res.whois,
+			}
 		}
 		if res.handle != "" && res.name != "" {
 			orgNames[res.handle] = res.name
@@ -224,9 +316,17 @@ func parseRipeDB(r io.Reader, filter map[int]bool) (map[int]OrgInfo, error) {
 	// Join: ASN -> OrgInfo
 	result := make(map[int]OrgInfo, len(autNumOrg))
 	for asn, entry := range autNumOrg {
+		// Prefer org-resolved name; fall back to descr or as-name for ARIN entries.
+		name := orgNames[entry.org]
+		if name == "" {
+			name = entry.descr
+		}
+		if name == "" {
+			name = entry.asName
+		}
 		result[asn] = OrgInfo{
 			Handle:        entry.org,
-			Name:          orgNames[entry.org],
+			Name:          name,
 			Country:       entry.country,
 			SponsorHandle: entry.sponsorOrg,
 			SponsorName:   orgNames[entry.sponsorOrg],
@@ -266,6 +366,18 @@ func parseBlock(lines []string) (blockResult, bool) {
 			if blockType == "aut-num" {
 				res.org = val
 			}
+		case "mnt-by":
+			if blockType == "aut-num" && res.mntBy == "" {
+				res.mntBy = val
+			}
+		case "as-name":
+			if blockType == "aut-num" {
+				res.asName = val
+			}
+		case "descr":
+			if blockType == "aut-num" && res.descr == "" {
+				res.descr = val
+			}
 		case "country":
 			if blockType == "aut-num" && res.country == "" {
 				res.country = strings.ToUpper(val)
@@ -285,7 +397,9 @@ func parseBlock(lines []string) (blockResult, bool) {
 		res.whois = strings.Join(lines, "\n")
 	}
 
-	useful := (blockType == "aut-num" && res.asn > 0 && res.org != "") ||
+	// Accept aut-num if it has either an org reference (RIPE/APNIC) or a
+	// direct as-name (ARIN style without org: field).
+	useful := (blockType == "aut-num" && res.asn > 0 && (res.org != "" || res.asName != "")) ||
 		(blockType == "organisation" && res.handle != "" && res.name != "")
 	return res, useful
 }
