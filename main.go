@@ -192,7 +192,7 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", mux))
 }
 
-var collectors = []string{"as211575", "as215172", "as213605"}
+var collectors = []string{"as211575", "as215172", "as213605", "as139317"}
 
 var feedCmds = func() []string {
 	cmds := make([]string, len(collectors))
