@@ -138,9 +138,13 @@ func parsePrefixPaths(r io.Reader, asns map[int]bool) ([]PrefixPath, error) {
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
 
-		// Prefix line: not indented, contains "unicast"
+		// Prefix line: not indented, contains a route type keyword.
+		isBirdRouteType := strings.Contains(line, "unicast") ||
+			strings.Contains(line, "unreachable") ||
+			strings.Contains(line, "blackhole") ||
+			strings.Contains(line, "prohibit")
 		if !strings.HasPrefix(line, "\t") && !strings.HasPrefix(line, " ") &&
-			strings.Contains(line, "unicast") {
+			isBirdRouteType {
 			if fields := strings.Fields(line); len(fields) > 0 {
 				currentPrefix = fields[0]
 			}
@@ -196,15 +200,24 @@ func buildPath(pathStr string, asns map[int]bool) []int {
 	fields := strings.Fields(pathStr)
 
 	// Step 1: collapse consecutive duplicates.
+	// When RootASN appears in the middle of a path (external collector view),
+	// restart from RootASN. Only treat it as a loop if RootASN was already
+	// the starting ASN and reappears.
 	deduped := make([]int, 0, len(fields))
 	prev := -1
+	seenRoot := false
 	for _, f := range fields {
 		asn, err := strconv.Atoi(f)
 		if err != nil {
 			continue
 		}
-		if asn == RootASN && len(deduped) > 0 {
-			break
+		if asn == RootASN {
+			if seenRoot {
+				break // genuine loop: 215172 → ... → 215172
+			}
+			seenRoot = true
+			deduped = deduped[:0]
+			prev = -1
 		}
 		if asn != prev {
 			deduped = append(deduped, asn)
@@ -236,13 +249,17 @@ func buildPath(pathStr string, asns map[int]bool) []int {
 		return []int{0, lastKnown}
 	}
 
-	// If another Tier1 follows 215172, that Tier1 is the relevant entry point;
-	// drop 215172 from the front.
+	// If another Tier1 follows 215172, the last Tier1 in the path is the
+	// relevant entry point; drop 215172 and any earlier Tier1s from the front.
 	if len(deduped) >= 2 && deduped[0] == RootASN {
-		for _, asn := range deduped[1:] {
+		lastT1Idx := -1
+		for i, asn := range deduped[1:] {
 			if Tier1ASNs[asn] {
-				return deduped[1:]
+				lastT1Idx = i + 1
 			}
+		}
+		if lastT1Idx != -1 {
+			return deduped[lastT1Idx:]
 		}
 	}
 

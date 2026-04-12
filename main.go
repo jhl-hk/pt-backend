@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -81,6 +82,9 @@ func main() {
 	if err := db.CreateTable(ctx, bunDB); err != nil {
 		log.Fatalf("create table: %v", err)
 	}
+	if err := db.CreatePrefixTable(ctx, bunDB); err != nil {
+		log.Fatalf("create prefix table: %v", err)
+	}
 	log.Println("database ready")
 
 	// Seed all known ASNs immediately (skips existing rows).
@@ -93,6 +97,15 @@ func main() {
 	} else {
 		log.Printf("seeded %d ASNs", len(seedRecords))
 	}
+
+	// Sync initial prefix data to DB.
+	go func() {
+		if err := db.UpsertPrefixes(ctx, bunDB, prefixRecords(paths)); err != nil {
+			log.Printf("upsert prefixes: %v", err)
+		} else {
+			log.Printf("upserted %d prefix records", len(paths))
+		}
+	}()
 
 	// --- HTTP server ---
 	log.Println("building route index...")
@@ -114,6 +127,7 @@ func main() {
 		for asn := range asns {
 			rec := db.ASNRecord{ID: asn, UpdatedAt: time.Now()}
 			if info, ok := orgMap[asn]; ok {
+				rec.Country = info.Country
 				rec.Org = info.Handle
 				rec.OrgName = info.Name
 				rec.SponsorOrg = info.SponsorHandle
@@ -143,6 +157,9 @@ func main() {
 			return
 		}
 		srv.SetIndex(handler.IndexByASN(newPaths))
+		if err := db.UpsertPrefixes(ctx, bunDB, prefixRecords(newPaths)); err != nil {
+			log.Printf("upsert prefixes: %v", err)
+		}
 		log.Printf("prefix index updated: %d paths", len(newPaths))
 	}
 
@@ -184,6 +201,37 @@ var feedCmds = func() []string {
 	}
 	return cmds
 }()
+
+func prefixRecords(paths []handler.PrefixPath) []db.PrefixRecord {
+	// Group paths by prefix to build the combined paths JSON per prefix.
+	type entry struct {
+		originASN int
+		paths     [][]int
+	}
+	grouped := make(map[string]*entry, len(paths))
+	order := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if e, ok := grouped[p.Prefix]; ok {
+			e.paths = append(e.paths, p.Path)
+		} else {
+			grouped[p.Prefix] = &entry{originASN: p.OriginASN, paths: [][]int{p.Path}}
+			order = append(order, p.Prefix)
+		}
+	}
+	now := time.Now()
+	records := make([]db.PrefixRecord, 0, len(grouped))
+	for _, prefix := range order {
+		e := grouped[prefix]
+		raw, _ := json.Marshal(e.paths)
+		records = append(records, db.PrefixRecord{
+			Prefix:    prefix,
+			OriginASN: e.originASN,
+			Paths:     raw,
+			UpdatedAt: now,
+		})
+	}
+	return records
+}
 
 func fetchFeeds(client *goph.Client) ([][]byte, error) {
 	feeds := make([][]byte, len(feedCmds))

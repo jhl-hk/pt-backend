@@ -20,6 +20,7 @@ const RipeDBURL = "https://ftp.ripe.net/ripe/dbase/ripe.db.gz"
 type OrgInfo struct {
 	Handle        string // e.g. ORG-ACME-RIPE
 	Name          string // e.g. ACME Corp
+	Country       string // ISO 3166-1 alpha-2 from aut-num country: field
 	SponsorHandle string // sponsoring-org handle (empty if none)
 	SponsorName   string // resolved name of the sponsoring org
 	Whois         string // raw aut-num block text from RIPE DB
@@ -130,6 +131,7 @@ func (p *progressReader) Read(buf []byte) (int, error) {
 type blockResult struct {
 	asn        int    // > 0 for aut-num blocks
 	org        string // org handle referenced by this ASN
+	country    string // country code from aut-num block
 	sponsorOrg string // sponsoring-org handle (aut-num blocks)
 	whois      string // raw block text (aut-num blocks)
 	handle     string // org handle defined by this organisation block
@@ -200,6 +202,7 @@ func parseRipeDB(r io.Reader, filter map[int]bool) (map[int]OrgInfo, error) {
 	// --- Collector ---
 	type asnEntry struct {
 		org        string
+		country    string
 		sponsorOrg string
 		whois      string
 	}
@@ -207,7 +210,7 @@ func parseRipeDB(r io.Reader, filter map[int]bool) (map[int]OrgInfo, error) {
 	orgNames := make(map[string]string) // org handle -> org-name
 	for res := range results {
 		if res.asn > 0 && res.org != "" && (filter == nil || filter[res.asn]) {
-			autNumOrg[res.asn] = asnEntry{org: res.org, sponsorOrg: res.sponsorOrg, whois: res.whois}
+			autNumOrg[res.asn] = asnEntry{org: res.org, country: res.country, sponsorOrg: res.sponsorOrg, whois: res.whois}
 		}
 		if res.handle != "" && res.name != "" {
 			orgNames[res.handle] = res.name
@@ -224,6 +227,7 @@ func parseRipeDB(r io.Reader, filter map[int]bool) (map[int]OrgInfo, error) {
 		result[asn] = OrgInfo{
 			Handle:        entry.org,
 			Name:          orgNames[entry.org],
+			Country:       entry.country,
 			SponsorHandle: entry.sponsorOrg,
 			SponsorName:   orgNames[entry.sponsorOrg],
 			Whois:         entry.whois,
@@ -261,6 +265,10 @@ func parseBlock(lines []string) (blockResult, bool) {
 		case "org":
 			if blockType == "aut-num" {
 				res.org = val
+			}
+		case "country":
+			if blockType == "aut-num" && res.country == "" {
+				res.country = strings.ToUpper(val)
 			}
 		case "sponsoring-org":
 			if blockType == "aut-num" {
