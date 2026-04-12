@@ -91,6 +91,44 @@ func ParsePrefixPathsFromBytes(data []byte, asns map[int]bool) ([]PrefixPath, er
 	return parsePrefixPaths(bytes.NewReader(data), asns)
 }
 
+// ParseMultipleFeedsFromBytes parses multiple BIRD routing table dumps and
+// merges them, deduplicating entries with the same (prefix, path).
+func ParseMultipleFeedsFromBytes(feeds [][]byte, asns map[int]bool) ([]PrefixPath, error) {
+	type key struct {
+		prefix  string
+		pathStr string
+	}
+	seen := make(map[key]bool)
+	var merged []PrefixPath
+
+	for _, feed := range feeds {
+		paths, err := parsePrefixPaths(bytes.NewReader(feed), asns)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range paths {
+			k := key{prefix: p.Prefix, pathStr: pathKey(p.Path)}
+			if !seen[k] {
+				seen[k] = true
+				merged = append(merged, p)
+			}
+		}
+	}
+	return merged, nil
+}
+
+// pathKey returns a stable string key for a path slice.
+func pathKey(path []int) string {
+	b := make([]byte, 0, len(path)*5)
+	for i, asn := range path {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = strconv.AppendInt(b, int64(asn), 10)
+	}
+	return string(b)
+}
+
 func parsePrefixPaths(r io.Reader, asns map[int]bool) ([]PrefixPath, error) {
 	var results []PrefixPath
 	var currentPrefix string
@@ -117,7 +155,7 @@ func parsePrefixPaths(r io.Reader, asns map[int]bool) ([]PrefixPath, error) {
 				Path:      path,
 				OriginASN: originASN(raw),
 			})
-			currentPrefix = ""
+			// Do NOT reset currentPrefix — the same prefix may have more paths below.
 		}
 	}
 	return results, scanner.Err()
