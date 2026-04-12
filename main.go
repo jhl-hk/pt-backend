@@ -244,7 +244,7 @@ func main() {
 	srv.RegisterRoutes(mux)
 
 	log.Println("listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	log.Fatal(http.ListenAndServe(":8080", corsMiddleware(mux)))
 }
 
 var collectors = []string{"as211575", "as215172", "as213605", "as139317", "as51087"}
