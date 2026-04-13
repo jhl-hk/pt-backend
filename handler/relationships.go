@@ -7,9 +7,11 @@ type Relationships struct {
 	UpstreamCount   int   `json:"upstream_count"`
 	DownstreamCount int   `json:"downstream_count"`
 	PeerCount       int   `json:"peer_count"`
+	ConeSize        int   `json:"cone_size"`
 	Upstream        []int `json:"upstream"`
 	Downstream      []int `json:"downstream"`
 	Peers           []int `json:"peers"`
+	Cone            []int `json:"cone"`
 }
 
 // CalculateRelationships derives upstream, downstream, and peer ASNs for the
@@ -76,13 +78,24 @@ func CalculateRelationships(asn int, index map[int][]PrefixPath) Relationships {
 	downstream := sortedKeys(downstreamSet)
 	peers := sortedKeys(peerSet)
 
+	// Cone: X itself plus all ASNs that route through X (transitive downstreams
+	// are already captured by the routing table).
+	coneSet := make(map[int]bool, len(downstreamSet)+1)
+	coneSet[asn] = true
+	for a := range downstreamSet {
+		coneSet[a] = true
+	}
+	cone := sortedKeys(coneSet)
+
 	return Relationships{
 		UpstreamCount:   len(upstream),
 		DownstreamCount: len(downstream),
 		PeerCount:       len(peers),
+		ConeSize:        len(cone),
 		Upstream:        upstream,
 		Downstream:      downstream,
 		Peers:           peers,
+		Cone:            cone,
 	}
 }
 
