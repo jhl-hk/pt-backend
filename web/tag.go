@@ -11,6 +11,7 @@ type tagASNEntry struct {
 	ASN     int    `json:"asn"`
 	Name    string `json:"name,omitempty"`
 	Short   string `json:"short,omitempty"`
+	OrgName string `json:"org_name,omitempty"`
 	Country string `json:"country,omitempty"`
 	Website string `json:"website,omitempty"`
 	Tags    string `json:"tags"`
@@ -36,12 +37,23 @@ func (s *Server) handleTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.mu.RLock()
+	orgMap := s.orgMap
+	s.mu.RUnlock()
+
 	entries := make([]tagASNEntry, 0, len(records))
 	for _, rec := range records {
+		orgName := rec.OrgName
+		if orgName == "" && orgMap != nil {
+			if info, ok := orgMap[rec.ID]; ok {
+				orgName = info.Name
+			}
+		}
 		entries = append(entries, tagASNEntry{
 			ASN:     rec.ID,
 			Name:    rec.Name,
 			Short:   rec.Short,
+			OrgName: orgName,
 			Country: rec.Country,
 			Website: rec.Website,
 			Tags:    rec.Tags,

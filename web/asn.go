@@ -105,7 +105,11 @@ func (s *Server) handleASNInfo(w http.ResponseWriter, r *http.Request) {
 			Model(&rec).
 			Where("id = ?", asn).
 			Scan(r.Context()); err == nil {
-			resp.Name = rec.Name
+			if rec.Name != "" {
+				resp.Name = rec.Name
+			} else {
+				resp.Name = rec.OrgName
+			}
 			resp.Short = rec.Short
 			resp.Country = rec.Country
 			resp.Website = rec.Website

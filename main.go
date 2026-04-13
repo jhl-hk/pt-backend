@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,6 +63,23 @@ func main() {
 		asnsMu.RLock()
 		a := asns
 		asnsMu.RUnlock()
+
+		// Always include collector ASNs in the IRR lookup filter.
+		if a == nil {
+			a = make(map[int]bool)
+		} else {
+			// clone so we don't mutate the shared map
+			clone := make(map[int]bool, len(a)+len(collectors))
+			for k, v := range a {
+				clone[k] = v
+			}
+			a = clone
+		}
+		for _, c := range collectors {
+			if n, err := strconv.Atoi(c); err == nil {
+				a[n] = true
+			}
+		}
 
 		log.Println("syncing IRR databases (APNIC + ARIN + RIPE)...")
 
