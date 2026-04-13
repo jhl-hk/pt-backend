@@ -314,7 +314,7 @@ func loadOrgMapFromDB(ctx context.Context, bunDB *bun.DB) map[int]handler.OrgInf
 	return m
 }
 
-var collectors = []string{"as211575", "as215172", "as213605", "as139317", "as51087"}
+var collectors = []string{"as211575", "as215172", "as213605", "as139317", "as51087", "as202734"}
 
 var feedCmds = func() []string {
 	cmds := make([]string, len(collectors))
