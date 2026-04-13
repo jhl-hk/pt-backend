@@ -95,6 +95,7 @@ func (s *Server) handlePrefixCount(w http.ResponseWriter, r *http.Request) {
 }
 
 type rankEntry struct {
+	Rank        int    `json:"rank"`
 	ASN         int    `json:"asn"`
 	Name        string `json:"name,omitempty"`
 	Short       string `json:"short,omitempty"`
@@ -132,9 +133,23 @@ func (s *Server) handleRankPrefix(w http.ResponseWriter, r *http.Request) {
 		all = append(all, e)
 	}
 
-	top := func(less func(a, b rankEntry) int) []rankEntry {
+	top := func(less func(a, b rankEntry) int, val func(rankEntry) int64) []rankEntry {
 		cp := slices.Clone(all)
-		slices.SortFunc(cp, less)
+		slices.SortFunc(cp, func(a, b rankEntry) int {
+			if n := less(a, b); n != 0 {
+				return n
+			}
+			return cmp.Compare(a.ASN, b.ASN)
+		})
+		rank, prevVal := 0, int64(-1)
+		for i := range cp {
+			v := val(cp[i])
+			if v != prevVal {
+				rank = i + 1
+				prevVal = v
+			}
+			cp[i].Rank = rank
+		}
 		if len(cp) > 100 {
 			cp = cp[:100]
 		}
@@ -145,8 +160,8 @@ func (s *Server) handleRankPrefix(w http.ResponseWriter, r *http.Request) {
 		V4 []rankEntry `json:"v4"`
 		V6 []rankEntry `json:"v6"`
 	}{
-		V4: top(func(a, b rankEntry) int { return cmp.Compare(b.V4Size, a.V4Size) }),
-		V6: top(func(a, b rankEntry) int { return cmp.Compare(b.V6Size, a.V6Size) }),
+		V4: top(func(a, b rankEntry) int { return cmp.Compare(b.V4Size, a.V4Size) }, func(e rankEntry) int64 { return e.V4Size }),
+		V6: top(func(a, b rankEntry) int { return cmp.Compare(b.V6Size, a.V6Size) }, func(e rankEntry) int64 { return e.V6Size }),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -10,6 +10,7 @@ import (
 )
 
 type relRankEntry struct {
+	Rank  int    `json:"rank"`
 	ASN   int    `json:"asn"`
 	Name  string `json:"name,omitempty"`
 	Count int    `json:"count"`
@@ -72,8 +73,19 @@ func rankRelEntries(
 		entries = append(entries, e)
 	}
 	slices.SortFunc(entries, func(a, b relRankEntry) int {
-		return cmp.Compare(b.Count, a.Count)
+		if n := cmp.Compare(b.Count, a.Count); n != 0 {
+			return n
+		}
+		return cmp.Compare(a.ASN, b.ASN)
 	})
+	rank, prevCount := 0, -1
+	for i := range entries {
+		if entries[i].Count != prevCount {
+			rank = i + 1
+			prevCount = entries[i].Count
+		}
+		entries[i].Rank = rank
+	}
 	if len(entries) > 100 {
 		entries = entries[:100]
 	}
