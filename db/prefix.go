@@ -46,3 +46,17 @@ func UpsertPrefixes(ctx context.Context, db *bun.DB, records []PrefixRecord) err
 func CountPrefixes(ctx context.Context, db *bun.DB) (int, error) {
 	return db.NewSelect().Model((*PrefixRecord)(nil)).Count(ctx)
 }
+
+// LoadAllPrefixes returns all rows from the prefixes table.
+func LoadAllPrefixes(ctx context.Context, db *bun.DB) ([]PrefixRecord, error) {
+	var records []PrefixRecord
+	err := db.NewSelect().Model(&records).Scan(ctx)
+	return records, err
+}
+
+// LoadAllASNIDs returns all ASN IDs from the asns table.
+func LoadAllASNIDs(ctx context.Context, db *bun.DB) ([]int, error) {
+	var ids []int
+	err := db.NewSelect().TableExpr("asns").Column("id").Scan(ctx, &ids)
+	return ids, err
+}

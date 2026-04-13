@@ -28,52 +28,7 @@ func main() {
 		log.Fatalf("load .env: %v", err)
 	}
 
-	// --- SSH client ---
-	rawKey := os.Getenv("private_key")
-	lines := strings.Split(rawKey, "\n")
-	for i, l := range lines {
-		lines[i] = strings.TrimSpace(l)
-	}
-	pemBytes := []byte(strings.Join(lines, "\n"))
-
-	signer, err := ssh.ParsePrivateKey(pemBytes)
-	if err != nil {
-		log.Fatalf("ssh key: %v", err)
-	}
-	auth := goph.Auth{ssh.PublicKeys(signer)}
-
-	client, err := goph.New(os.Getenv("user"), os.Getenv("host"), auth)
-	if err != nil {
-		log.Fatalf("ssh connect: %v", err)
-	}
-	defer client.Close()
-
-	// --- Initial data fetch ---
-	client.Run("sudo /etc/bird/update-moedove.sh")
-	asnsData, err := client.Run("sudo cat /etc/bird/as_moedove_asns.conf")
-	if err != nil {
-		log.Println("Failed to get asns data")
-	}
-
-	asns, err := handler.LoadASNsFromBytes(asnsData)
-	if err != nil {
-		log.Fatalf("load asns: %v", err)
-	}
-
-	log.Printf("fetching %d feed(s)...", len(feedCmds))
-	feeds, err := fetchFeeds(client)
-	if err != nil {
-		log.Printf("fetch feeds: %v", err)
-	}
-	log.Printf("feeds fetched: %d", len(feeds))
-
-	paths, err := handler.ParseMultipleFeedsFromBytes(feeds, asns)
-	if err != nil {
-		log.Fatalf("parse feeds: %v", err)
-	}
-	log.Printf("parsed %d prefix paths from %d ASNs", len(paths), len(asns))
-
-	// --- PostgreSQL ---
+	// --- PostgreSQL (connect first so server can start immediately) ---
 	log.Println("connecting to database...")
 	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(os.Getenv("DATABASE_URL"))))
 	bunDB := bun.NewDB(sqldb, pgdialect.New())
@@ -88,74 +43,66 @@ func main() {
 	}
 	log.Println("database ready")
 
-	// Seed all known ASNs immediately (skips existing rows).
-	seedRecords := make([]db.ASNRecord, 0, len(asns))
-	for asn := range asns {
-		seedRecords = append(seedRecords, db.ASNRecord{ID: asn, UpdatedAt: time.Now()})
-	}
-	if err := db.SeedASNs(ctx, bunDB, seedRecords); err != nil {
-		log.Printf("seed asns: %v", err)
-	} else {
-		log.Printf("seeded %d ASNs", len(seedRecords))
-	}
+	// --- Load initial data from DB ---
+	asns := loadASNsFromDB(ctx, bunDB)
+	paths := loadPathsFromDB(ctx, bunDB)
+	orgMap := loadOrgMapFromDB(ctx, bunDB)
 
-	// Sync initial prefix data to DB.
-	go func() {
-		if err := db.UpsertPrefixes(ctx, bunDB, prefixRecords(paths)); err != nil {
-			log.Printf("upsert prefixes: %v", err)
-		} else {
-			log.Printf("upserted %d prefix records", len(paths))
-		}
-	}()
-
-	// --- HTTP server ---
+	// --- HTTP server (starts immediately with DB data) ---
 	log.Println("building route index...")
 	srv := web.NewServer(handler.IndexByASN(paths), bunDB)
+	srv.SetOrgMap(orgMap)
 	log.Println("route index ready")
+
+	var asnsMu sync.RWMutex
 
 	// syncRipeDB fetches APNIC + ARIN + RIPE DBs, merges them
 	// (priority: APNIC < ARIN < RIPE), and updates srv orgMap and DB.
 	syncRipeDB := func() {
+		asnsMu.RLock()
+		a := asns
+		asnsMu.RUnlock()
+
 		log.Println("syncing IRR databases (APNIC + ARIN + RIPE)...")
 
-		orgMap := make(map[int]handler.OrgInfo)
+		om := make(map[int]handler.OrgInfo)
 
-		apnicMap, err := handler.LoadAPNICOrgMap(asns)
+		apnicMap, err := handler.LoadAPNICOrgMap(a)
 		if err != nil {
 			log.Printf("apnic db load failed: %v", err)
 		} else {
 			for asn, info := range apnicMap {
-				orgMap[asn] = info
+				om[asn] = info
 			}
 			log.Printf("APNIC DB loaded: %d entries", len(apnicMap))
 		}
 
-		arinMap, err := handler.LoadARINOrgMap(asns)
+		arinMap, err := handler.LoadARINOrgMap(a)
 		if err != nil {
 			log.Printf("arin db load failed: %v", err)
 		} else {
 			for asn, info := range arinMap {
-				orgMap[asn] = info
+				om[asn] = info
 			}
 			log.Printf("ARIN DB loaded: %d entries", len(arinMap))
 		}
 
-		ripeMap, err := handler.LoadRipeOrgMap(asns)
+		ripeMap, err := handler.LoadRipeOrgMap(a)
 		if err != nil {
 			log.Printf("ripe db sync failed: %v", err)
 		} else {
 			for asn, info := range ripeMap {
-				orgMap[asn] = info
+				om[asn] = info
 			}
 			log.Printf("RIPE DB loaded: %d entries", len(ripeMap))
 		}
 
-		srv.SetOrgMap(orgMap)
-		log.Printf("IRR sync done: %d total entries", len(orgMap))
+		srv.SetOrgMap(om)
+		log.Printf("IRR sync done: %d total entries", len(om))
 
 		// Only upsert ASNs that have IRR data — never overwrite with empty values.
-		records := make([]db.ASNRecord, 0, len(orgMap))
-		for asn, info := range orgMap {
+		records := make([]db.ASNRecord, 0, len(om))
+		for asn, info := range om {
 			records = append(records, db.ASNRecord{
 				ID:          asn,
 				Country:     info.Country,
@@ -174,69 +121,108 @@ func main() {
 		log.Printf("upserted %d ASN records", len(records))
 	}
 
-	// syncPrefixes re-fetches all feeds and updates the index.
-	syncPrefixes := func() {
-		log.Println("syncing prefix data...")
-		feeds, err := fetchFeeds(client)
-		if err != nil {
-			log.Printf("fetch feeds: %v", err)
-			return
-		}
-		newPaths, err := handler.ParseMultipleFeedsFromBytes(feeds, asns)
-		if err != nil {
-			log.Printf("parse feeds: %v", err)
-			return
-		}
-		srv.SetIndex(handler.IndexByASN(newPaths))
-		if err := db.UpsertPrefixes(ctx, bunDB, prefixRecords(newPaths)); err != nil {
-			log.Printf("upsert prefixes: %v", err)
-		}
-		log.Printf("prefix index updated: %d paths", len(newPaths))
-	}
-
-	// Initial RIPE DB sync in background.
+	// Initial IRR DB sync in background.
 	go syncRipeDB()
 
-	// Every 10 minutes: refresh prefix data.
+	// --- SSH client (background; server already running with DB data) ---
 	go func() {
-		ticker := time.NewTicker(10 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			syncPrefixes()
+		client, err := newSSHClient()
+		if err != nil {
+			log.Printf("ssh connect: %v", err)
+			return
 		}
-	}()
+		defer client.Close()
 
-	// Daily at 00:00: re-sync IRR databases + update BIRD ASN list.
-	go func() {
-		for {
-			now := time.Now()
-			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
-			time.Sleep(time.Until(next))
+		// syncPrefixes re-fetches all feeds and updates the index.
+		syncPrefixes := func() {
+			asnsMu.RLock()
+			a := asns
+			asnsMu.RUnlock()
 
-			log.Println("daily: running update-moedove.sh on router...")
-			if _, err := client.Run("sudo /etc/bird/update-moedove.sh"); err != nil {
-				log.Printf("daily: update-moedove.sh failed: %v", err)
-			}
-
-			// Re-fetch updated ASN list.
-			newAsnsData, err := client.Run("sudo cat /etc/bird/as_moedove_asns.conf")
+			log.Println("syncing prefix data...")
+			feeds, err := fetchFeeds(client)
 			if err != nil {
-				log.Printf("daily: fetch asns failed: %v", err)
+				log.Printf("fetch feeds: %v", err)
+				return
+			}
+			newPaths, err := handler.ParseMultipleFeedsFromBytes(feeds, a)
+			if err != nil {
+				log.Printf("parse feeds: %v", err)
+				return
+			}
+			srv.SetIndex(handler.IndexByASN(newPaths))
+			if err := db.UpsertPrefixes(ctx, bunDB, prefixRecords(newPaths)); err != nil {
+				log.Printf("upsert prefixes: %v", err)
+			}
+			log.Printf("prefix index updated: %d paths", len(newPaths))
+		}
+
+		// Initial data fetch from router.
+		client.Run("sudo /etc/bird/update-moedove.sh")
+		if asnsData, err := client.Run("sudo cat /etc/bird/as_moedove_asns.conf"); err != nil {
+			log.Printf("fetch asns from router: %v", err)
+		} else if newAsns, err := handler.LoadASNsFromBytes(asnsData); err != nil {
+			log.Printf("parse asns: %v", err)
+		} else {
+			asnsMu.Lock()
+			asns = newAsns
+			asnsMu.Unlock()
+			log.Printf("asns loaded from router: %d entries", len(newAsns))
+
+			// Seed any new ASNs to DB.
+			seedRecords := make([]db.ASNRecord, 0, len(newAsns))
+			for asn := range newAsns {
+				seedRecords = append(seedRecords, db.ASNRecord{ID: asn, UpdatedAt: time.Now()})
+			}
+			if err := db.SeedASNs(ctx, bunDB, seedRecords); err != nil {
+				log.Printf("seed asns: %v", err)
 			} else {
-				if newAsns, err := handler.LoadASNsFromBytes(newAsnsData); err != nil {
+				log.Printf("seeded %d ASNs", len(seedRecords))
+			}
+		}
+
+		log.Printf("fetching %d feed(s)...", len(feedCmds))
+		syncPrefixes()
+
+		// Every 10 minutes: refresh prefix data.
+		prefixTicker := time.NewTicker(10 * time.Minute)
+		defer prefixTicker.Stop()
+
+		// Daily at 00:00: re-sync IRR databases + update BIRD ASN list.
+		go func() {
+			for {
+				now := time.Now()
+				next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+				time.Sleep(time.Until(next))
+
+				log.Println("daily: running update-moedove.sh on router...")
+				if _, err := client.Run("sudo /etc/bird/update-moedove.sh"); err != nil {
+					log.Printf("daily: update-moedove.sh failed: %v", err)
+				}
+
+				newAsnsData, err := client.Run("sudo cat /etc/bird/as_moedove_asns.conf")
+				if err != nil {
+					log.Printf("daily: fetch asns failed: %v", err)
+				} else if newAsns, err := handler.LoadASNsFromBytes(newAsnsData); err != nil {
 					log.Printf("daily: parse asns failed: %v", err)
 				} else {
+					asnsMu.Lock()
 					asns = newAsns
-					log.Printf("daily: asns updated: %d entries", len(asns))
+					asnsMu.Unlock()
+					log.Printf("daily: asns updated: %d entries", len(newAsns))
 				}
-			}
 
-			// Delete cached IRR files so they are re-downloaded fresh.
-			for _, f := range []string{"temp/ripe.db.gz", "temp/arin.db.gz", "temp/apnic.db.aut-num.gz", "temp/apnic.db.organisation.gz"} {
-				os.Remove(f)
-			}
+				// Delete cached IRR files so they are re-downloaded fresh.
+				for _, f := range []string{"temp/ripe.db.gz", "temp/arin.db.gz", "temp/apnic.db.aut-num.gz", "temp/apnic.db.organisation.gz"} {
+					os.Remove(f)
+				}
 
-			syncRipeDB()
+				syncRipeDB()
+			}
+		}()
+
+		for range prefixTicker.C {
+			syncPrefixes()
 		}
 	}()
 
@@ -245,6 +231,87 @@ func main() {
 
 	log.Println("listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", corsMiddleware(mux)))
+}
+
+// newSSHClient builds and connects the SSH client from environment variables.
+func newSSHClient() (*goph.Client, error) {
+	rawKey := os.Getenv("private_key")
+	lines := strings.Split(rawKey, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimSpace(l)
+	}
+	pemBytes := []byte(strings.Join(lines, "\n"))
+
+	signer, err := ssh.ParsePrivateKey(pemBytes)
+	if err != nil {
+		return nil, err
+	}
+	return goph.New(os.Getenv("user"), os.Getenv("host"), goph.Auth{ssh.PublicKeys(signer)})
+}
+
+// loadASNsFromDB returns the set of ASN IDs stored in the database.
+// Returns an empty map (never nil) on error.
+func loadASNsFromDB(ctx context.Context, bunDB *bun.DB) map[int]bool {
+	ids, err := db.LoadAllASNIDs(ctx, bunDB)
+	if err != nil {
+		log.Printf("load asns from DB: %v", err)
+		return make(map[int]bool)
+	}
+	m := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		m[id] = true
+	}
+	log.Printf("loaded %d ASNs from DB", len(m))
+	return m
+}
+
+// loadPathsFromDB reconstructs []PrefixPath from the prefixes table.
+func loadPathsFromDB(ctx context.Context, bunDB *bun.DB) []handler.PrefixPath {
+	records, err := db.LoadAllPrefixes(ctx, bunDB)
+	if err != nil {
+		log.Printf("load prefixes from DB: %v", err)
+		return nil
+	}
+	var paths []handler.PrefixPath
+	for _, r := range records {
+		var rawPaths [][]int
+		if err := json.Unmarshal(r.Paths, &rawPaths); err != nil {
+			continue
+		}
+		for _, p := range rawPaths {
+			paths = append(paths, handler.PrefixPath{
+				Prefix:    r.Prefix,
+				Path:      p,
+				OriginASN: r.OriginASN,
+			})
+		}
+	}
+	log.Printf("loaded %d prefix paths from DB", len(paths))
+	return paths
+}
+
+// loadOrgMapFromDB reconstructs the orgMap from the asns table.
+func loadOrgMapFromDB(ctx context.Context, bunDB *bun.DB) map[int]handler.OrgInfo {
+	var records []db.ASNRecord
+	if err := bunDB.NewSelect().Model(&records).
+		Where("org != '' OR org_name != '' OR country != ''").
+		Scan(ctx); err != nil {
+		log.Printf("load org map from DB: %v", err)
+		return nil
+	}
+	m := make(map[int]handler.OrgInfo, len(records))
+	for _, r := range records {
+		m[r.ID] = handler.OrgInfo{
+			Handle:        r.Org,
+			Name:          r.OrgName,
+			Country:       r.Country,
+			SponsorHandle: r.SponsorOrg,
+			SponsorName:   r.SponsorName,
+			Whois:         r.Whois,
+		}
+	}
+	log.Printf("loaded org info for %d ASNs from DB", len(m))
+	return m
 }
 
 var collectors = []string{"as211575", "as215172", "as213605", "as139317", "as51087"}
