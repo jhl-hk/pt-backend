@@ -22,7 +22,7 @@ type prefixResponse struct {
 	Paths  [][]int `json:"paths"`
 }
 
-type asnResponse struct {
+type asnInfoResponse struct {
 	ASN           int                    `json:"asn"`
 	Name          string                 `json:"name,omitempty"`
 	Short         string                 `json:"short,omitempty"`
@@ -30,26 +30,27 @@ type asnResponse struct {
 	Website       string                 `json:"website,omitempty"`
 	Tags          string                 `json:"tags"`
 	Comments      string                 `json:"comments,omitempty"`
-	Whois         string                 `json:"whois,omitempty"`
 	Org           *orgResponse           `json:"org,omitempty"`
 	SponsorOrg    *orgResponse           `json:"sponsor_org,omitempty"`
 	Relationships *handler.Relationships `json:"relationships,omitempty"`
 	PrefixCount   int                    `json:"prefix_count"`
 	prefixStats
-	Prefixes []prefixResponse `json:"prefixes"`
 }
 
-func (s *Server) handleASN(w http.ResponseWriter, r *http.Request) {
-	asnStr := r.PathValue("asn")
-	asn, err := strconv.Atoi(asnStr)
+// parseASN extracts and validates the {asn} path value.
+func parseASN(w http.ResponseWriter, r *http.Request) (int, bool) {
+	asn, err := strconv.Atoi(r.PathValue("asn"))
 	if err != nil {
 		http.Error(w, "invalid asn", http.StatusBadRequest)
-		return
+		return 0, false
 	}
+	return asn, true
+}
 
+// sortedPaths returns a clone of the index paths for asn, sorted IPv4-before-IPv6.
+func (s *Server) sortedPaths(asn int) []handler.PrefixPath {
 	s.mu.RLock()
 	paths := slices.Clone(s.index[asn])
-	rel := handler.CalculateRelationships(asn, s.index)
 	s.mu.RUnlock()
 	slices.SortFunc(paths, func(a, b handler.PrefixPath) int {
 		pa, _ := netip.ParsePrefix(a.Prefix)
@@ -66,18 +67,38 @@ func (s *Server) handleASN(w http.ResponseWriter, r *http.Request) {
 		}
 		return cmp.Compare(pa.Bits(), pb.Bits())
 	})
+	return paths
+}
 
-	s.mu.RLock()
-	orgMap := s.orgMap
-	s.mu.RUnlock()
-
-	resp := asnResponse{
-		ASN:           asn,
-		Relationships: &rel,
-		Prefixes:      make([]prefixResponse, 0, len(paths)),
+// handleASNInfo returns basic AS metadata: name, country, org, relationships, prefix counts.
+func (s *Server) handleASNInfo(w http.ResponseWriter, r *http.Request) {
+	asn, ok := parseASN(w, r)
+	if !ok {
+		return
 	}
 
-	// Load DB record for name, short, tags, comments.
+	s.mu.RLock()
+	rel := handler.CalculateRelationships(asn, s.index)
+	orgMap := s.orgMap
+	paths := s.index[asn]
+	prefixSet := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		prefixSet[p.Prefix] = struct{}{}
+	}
+	s.mu.RUnlock()
+
+	prefixes := make([]string, 0, len(prefixSet))
+	for p := range prefixSet {
+		prefixes = append(prefixes, p)
+	}
+
+	resp := asnInfoResponse{
+		ASN:           asn,
+		Relationships: &rel,
+		PrefixCount:   len(prefixes),
+		prefixStats:   computePrefixStats(prefixes),
+	}
+
 	if s.bunDB != nil {
 		var rec db.ASNRecord
 		if err := s.bunDB.NewSelect().
@@ -90,7 +111,6 @@ func (s *Server) handleASN(w http.ResponseWriter, r *http.Request) {
 			resp.Website = rec.Website
 			resp.Tags = rec.Tags
 			resp.Comments = rec.Comments
-			resp.Whois = rec.Whois
 		}
 	}
 
@@ -103,7 +123,45 @@ func (s *Server) handleASN(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Group paths by prefix (preserve sorted order of first occurrence).
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// handleASNWhois returns the raw RIPE aut-num whois block as plain text.
+func (s *Server) handleASNWhois(w http.ResponseWriter, r *http.Request) {
+	asn, ok := parseASN(w, r)
+	if !ok {
+		return
+	}
+
+	if s.bunDB == nil {
+		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var rec db.ASNRecord
+	if err := s.bunDB.NewSelect().
+		Model(&rec).
+		Column("whois").
+		Where("id = ?", asn).
+		Scan(r.Context()); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte(rec.Whois))
+}
+
+// handleASNCIDR returns the prefix list with BGP paths for the given AS.
+func (s *Server) handleASNCIDR(w http.ResponseWriter, r *http.Request) {
+	asn, ok := parseASN(w, r)
+	if !ok {
+		return
+	}
+
+	paths := s.sortedPaths(asn)
+
 	type entry struct{ paths [][]int }
 	grouped := make(map[string]*entry)
 	order := make([]string, 0, len(paths))
@@ -115,14 +173,22 @@ func (s *Server) handleASN(w http.ResponseWriter, r *http.Request) {
 			order = append(order, p.Prefix)
 		}
 	}
+
+	prefixes := make([]prefixResponse, 0, len(order))
 	for _, prefix := range order {
-		resp.Prefixes = append(resp.Prefixes, prefixResponse{
+		prefixes = append(prefixes, prefixResponse{
 			Prefix: prefix,
 			Paths:  grouped[prefix].paths,
 		})
 	}
-	resp.PrefixCount = len(resp.Prefixes)
-	resp.prefixStats = computePrefixStats(order)
+
+	resp := struct {
+		ASN      int              `json:"asn"`
+		Prefixes []prefixResponse `json:"prefixes"`
+	}{
+		ASN:      asn,
+		Prefixes: prefixes,
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

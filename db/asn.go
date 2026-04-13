@@ -61,6 +61,19 @@ func SeedASNs(ctx context.Context, db *bun.DB, records []ASNRecord) error {
 	return err
 }
 
+// GetASNsByTag returns all ASN records that have the given tag in their tags field.
+// Tags are stored as a comma-separated string (e.g. "1,2,3"); matching is done by
+// wrapping both the stored value and the tag with commas to avoid partial matches.
+func GetASNsByTag(ctx context.Context, db *bun.DB, tag string) ([]ASNRecord, error) {
+	var records []ASNRecord
+	err := db.NewSelect().
+		Model(&records).
+		Where("(',' || tags || ',') LIKE ?", "%,"+tag+",%").
+		OrderExpr("id ASC").
+		Scan(ctx)
+	return records, err
+}
+
 // UpsertASNs inserts or updates all records, preserving existing tags and comments.
 func UpsertASNs(ctx context.Context, db *bun.DB, records []ASNRecord) error {
 	if len(records) == 0 {

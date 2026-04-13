@@ -32,7 +32,10 @@ func (s *Server) SetIndex(index map[int][]handler.PrefixPath) {
 }
 
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/api/v1/asn/{asn}", s.handleASN)
+	mux.HandleFunc("/api/v1/asn/{asn}", s.handleASNInfo)
+	mux.HandleFunc("/api/v1/whois/{asn}", s.handleASNWhois)
+	mux.HandleFunc("/api/v1/cidr/{asn}", s.handleASNCIDR)
+	mux.HandleFunc("/api/v1/tag/{tag}", s.handleTag)
 	mux.HandleFunc("/api/v1/prefixes/count", s.handlePrefixCount)
 	mux.HandleFunc("/api/v1/rank/prefix", s.handleRankPrefix)
 	mux.HandleFunc("/api/v1/rank/downstream", s.handleRankDownstream)
