@@ -314,12 +314,12 @@ func loadOrgMapFromDB(ctx context.Context, bunDB *bun.DB) map[int]handler.OrgInf
 	return m
 }
 
-var collectors = []string{"as211575", "as215172", "as213605", "as139317", "as51087", "as202734"}
+var collectors = []string{"211575", "215172", "213605", "139317", "51087", "202734", "44324"}
 
 var feedCmds = func() []string {
 	cmds := make([]string, len(collectors))
 	for i, c := range collectors {
-		cmds[i] = "sudo birdc show route protocol " + c + "_collector all"
+		cmds[i] = "sudo birdc show route protocol as" + c + "_collector all"
 	}
 	return cmds
 }()

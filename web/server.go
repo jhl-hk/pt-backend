@@ -35,4 +35,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/asn/{asn}", s.handleASN)
 	mux.HandleFunc("/api/v1/prefixes/count", s.handlePrefixCount)
 	mux.HandleFunc("/api/v1/rank/prefix", s.handleRankPrefix)
+	mux.HandleFunc("/api/v1/rank/downstream", s.handleRankDownstream)
+	mux.HandleFunc("/api/v1/rank/peer", s.handleRankPeer)
+	mux.HandleFunc("/api/v1/rank/ascone", s.handleRankASCone)
 }
