@@ -13,49 +13,47 @@ type ASNSummary struct {
 	Peers       []uint32 `json:"peers"`
 }
 
+// containsASN reports whether asn appears anywhere in slice.
+func containsASN(slice []uint32, asn uint32) bool {
+	for _, v := range slice {
+		if v == asn {
+			return true
+		}
+	}
+	return false
+}
+
 // GetASNSummary returns an aggregated summary for an ASN derived from the route store.
 // Returns (nil, false) if the ASN has no originated prefixes in the store.
 func (h *BGPHandler) GetASNSummary(asn uint32) (*ASNSummary, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
+	// Prefixes, upstreams, tier1s — scan only the prefixes this ASN originates.
 	prefixSet := make(map[string]struct{})
 	upstreamSet := make(map[uint32]struct{})
 	tier1Set := make(map[uint32]struct{})
-	downstreamSet := make(map[uint32]struct{})
-	adjacentSet := make(map[uint32]struct{})
 
-	for prefix, peerMap := range h.store {
+	for prefix := range h.originIndex[asn] {
+		peerMap, ok := h.store[prefix]
+		if !ok {
+			continue
+		}
 		for _, a := range peerMap {
-			if a.OriginAS == asn {
-				prefixSet[prefix] = struct{}{}
-				if a.DirectUpstream != 0 {
-					upstreamSet[a.DirectUpstream] = struct{}{}
-				}
-				for _, u := range a.UpstreamChain {
+			if a.OriginAS != asn {
+				continue
+			}
+			prefixSet[prefix] = struct{}{}
+			if a.DirectUpstream != 0 {
+				upstreamSet[a.DirectUpstream] = struct{}{}
+			}
+			for _, u := range a.UpstreamChain {
+				if u != 0 {
 					upstreamSet[u] = struct{}{}
 				}
-				if a.Tier1Found != 0 {
-					tier1Set[a.Tier1Found] = struct{}{}
-				}
 			}
-			// Downstreams: routes where asn is in the upstream chain
-			for _, u := range a.UpstreamChain {
-				if u == asn && a.OriginAS != asn {
-					downstreamSet[a.OriginAS] = struct{}{}
-				}
-			}
-			// Adjacent ASNs in every path containing asn
-			for i, pathASN := range a.ASPath {
-				if pathASN == asn {
-					if i > 0 {
-						adjacentSet[a.ASPath[i-1]] = struct{}{}
-					}
-					if i < len(a.ASPath)-1 {
-						adjacentSet[a.ASPath[i+1]] = struct{}{}
-					}
-					break
-				}
+			if a.Tier1Found != 0 {
+				tier1Set[a.Tier1Found] = struct{}{}
 			}
 		}
 	}
@@ -64,9 +62,33 @@ func (h *BGPHandler) GetASNSummary(asn uint32) (*ASNSummary, bool) {
 		return nil, false
 	}
 
-	// Peers = adjacent ASNs that are neither upstreams, downstreams, nor self
+	// Downstreams — use transitIndex as candidate list, verify each via originIndex.
+	downstreamSet := make(map[uint32]struct{})
+	for candidateOrigin := range h.transitIndex[asn] {
+		if candidateOrigin == asn {
+			continue
+		}
+	downstreamPrefixLoop:
+		for prefix := range h.originIndex[candidateOrigin] {
+			peerMap, ok := h.store[prefix]
+			if !ok {
+				continue
+			}
+			for _, a := range peerMap {
+				if a.OriginAS != candidateOrigin {
+					continue
+				}
+				if containsASN(a.UpstreamChain, asn) {
+					downstreamSet[candidateOrigin] = struct{}{}
+					break downstreamPrefixLoop
+				}
+			}
+		}
+	}
+
+	// Peers — adjacent ASNs (from adjacentIndex) minus upstreams, downstreams, self.
 	peerSet := make(map[uint32]struct{})
-	for adj := range adjacentSet {
+	for adj := range h.adjacentIndex[asn] {
 		if adj == asn {
 			continue
 		}
@@ -116,17 +138,8 @@ func (h *BGPHandler) GetASNPrefixes(asn uint32) []string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	seen := make(map[string]struct{})
-	for prefix, peerMap := range h.store {
-		for _, a := range peerMap {
-			if a.OriginAS == asn {
-				seen[prefix] = struct{}{}
-				break
-			}
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for p := range seen {
+	out := make([]string, 0, len(h.originIndex[asn]))
+	for p := range h.originIndex[asn] {
 		out = append(out, p)
 	}
 	sort.Strings(out)
@@ -139,7 +152,11 @@ func (h *BGPHandler) GetASNUpstreams(asn uint32) []uint32 {
 	defer h.mu.RUnlock()
 
 	set := make(map[uint32]struct{})
-	for _, peerMap := range h.store {
+	for prefix := range h.originIndex[asn] {
+		peerMap, ok := h.store[prefix]
+		if !ok {
+			continue
+		}
 		for _, a := range peerMap {
 			if a.OriginAS != asn {
 				continue
@@ -148,7 +165,9 @@ func (h *BGPHandler) GetASNUpstreams(asn uint32) []uint32 {
 				set[a.DirectUpstream] = struct{}{}
 			}
 			for _, u := range a.UpstreamChain {
-				set[u] = struct{}{}
+				if u != 0 {
+					set[u] = struct{}{}
+				}
 			}
 		}
 	}
@@ -166,15 +185,23 @@ func (h *BGPHandler) GetASNDownstreams(asn uint32) []uint32 {
 	defer h.mu.RUnlock()
 
 	set := make(map[uint32]struct{})
-	for _, peerMap := range h.store {
-		for _, a := range peerMap {
-			if a.OriginAS == asn {
+	for candidateOrigin := range h.transitIndex[asn] {
+		if candidateOrigin == asn {
+			continue
+		}
+	prefixLoop:
+		for prefix := range h.originIndex[candidateOrigin] {
+			peerMap, ok := h.store[prefix]
+			if !ok {
 				continue
 			}
-			for _, u := range a.UpstreamChain {
-				if u == asn {
-					set[a.OriginAS] = struct{}{}
-					break
+			for _, a := range peerMap {
+				if a.OriginAS != candidateOrigin {
+					continue
+				}
+				if containsASN(a.UpstreamChain, asn) {
+					set[candidateOrigin] = struct{}{}
+					break prefixLoop
 				}
 			}
 		}
@@ -193,45 +220,55 @@ func (h *BGPHandler) GetASNPeers(asn uint32) []uint32 {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
+	// Upstreams: scan only the prefixes this ASN originates.
 	upstreamSet := make(map[uint32]struct{})
-	downstreamSet := make(map[uint32]struct{})
-	adjacentSet := make(map[uint32]struct{})
-
-	for _, peerMap := range h.store {
+	for prefix := range h.originIndex[asn] {
+		peerMap, ok := h.store[prefix]
+		if !ok {
+			continue
+		}
 		for _, a := range peerMap {
-			// Build upstream set for asn
-			if a.OriginAS == asn {
-				if a.DirectUpstream != 0 {
-					upstreamSet[a.DirectUpstream] = struct{}{}
-				}
-				for _, u := range a.UpstreamChain {
-					upstreamSet[u] = struct{}{}
-				}
+			if a.OriginAS != asn {
+				continue
 			}
-			// Build downstream set for asn
+			if a.DirectUpstream != 0 {
+				upstreamSet[a.DirectUpstream] = struct{}{}
+			}
 			for _, u := range a.UpstreamChain {
-				if u == asn && a.OriginAS != asn {
-					downstreamSet[a.OriginAS] = struct{}{}
-					break
-				}
-			}
-			// Collect ASNs directly adjacent to asn in this path
-			for i, pathASN := range a.ASPath {
-				if pathASN == asn {
-					if i > 0 {
-						adjacentSet[a.ASPath[i-1]] = struct{}{}
-					}
-					if i < len(a.ASPath)-1 {
-						adjacentSet[a.ASPath[i+1]] = struct{}{}
-					}
-					break
+				if u != 0 {
+					upstreamSet[u] = struct{}{}
 				}
 			}
 		}
 	}
 
+	// Downstreams: transitIndex candidates, verified via originIndex.
+	downstreamSet := make(map[uint32]struct{})
+	for candidateOrigin := range h.transitIndex[asn] {
+		if candidateOrigin == asn {
+			continue
+		}
+	peerPrefixLoop:
+		for prefix := range h.originIndex[candidateOrigin] {
+			peerMap, ok := h.store[prefix]
+			if !ok {
+				continue
+			}
+			for _, a := range peerMap {
+				if a.OriginAS != candidateOrigin {
+					continue
+				}
+				if containsASN(a.UpstreamChain, asn) {
+					downstreamSet[candidateOrigin] = struct{}{}
+					break peerPrefixLoop
+				}
+			}
+		}
+	}
+
+	// Peers: adjacentIndex[asn] minus upstreams, downstreams, self.
 	out := make([]uint32, 0)
-	for adj := range adjacentSet {
+	for adj := range h.adjacentIndex[asn] {
 		if adj == asn {
 			continue
 		}

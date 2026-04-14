@@ -27,7 +27,7 @@ func (s *Server) handleASN(w http.ResponseWriter, r *http.Request) {
 	}
 
 	subResources := map[string]bool{
-		"prefixes": true, "upstreams": true, "downstreams": true, "peers": true,
+		"prefixes": true, "upstreams": true, "downstreams": true, "peers": true, "graph": true,
 	}
 
 	var asnStr, subResource string
@@ -82,6 +82,10 @@ func (s *Server) handleASN(w http.ResponseWriter, r *http.Request) {
 			"count": len(peers),
 			"peers": peers,
 		})
+
+	case "graph":
+		graph := s.handler.GetASNGraph(asn)
+		json.NewEncoder(w).Encode(graph)
 
 	default:
 		summary, ok := s.handler.GetASNSummary(asn)

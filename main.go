@@ -25,14 +25,22 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// 2. Initialize DB
-	_ = db.NewDatabase()
+	// 2. Initialize DB (optional — only if DSN is configured)
+	var database *db.Database
+	if cfg.Database.DSN != "" {
+		var dbErr error
+		database, dbErr = db.NewDatabase(cfg.Database.DSN)
+		if dbErr != nil {
+			log.Fatalf("DB init failed: %v", dbErr)
+		}
+		log.Println("Database connected.")
+	}
 
 	// 3. Initialize BGP Collector
 	collector := bgp.NewCollector()
 
 	// 4. Initialize BGP Handler
-	bgpHandler := handler.NewBGPHandler(collector)
+	bgpHandler := handler.NewBGPHandler(collector, database)
 
 	// 5. Initialize Web Server
 	webServer := web.NewServer(8080, bgpHandler)
@@ -54,6 +62,13 @@ func main() {
 		cfg.Global.ASN, cfg.Global.RouterID, cfg.Global.Port)
 	if err := collector.Start(ctx, cfg.Global.ASN, cfg.Global.RouterID); err != nil {
 		log.Fatalf("Failed to start collector: %v", err)
+	}
+
+	// Hydrate in-memory store from DB before accepting BGP updates.
+	if database != nil {
+		if err := bgpHandler.LoadFromDB(ctx); err != nil {
+			log.Printf("DB hydration failed (continuing without): %v", err)
+		}
 	}
 
 	// Initial neighbor sync

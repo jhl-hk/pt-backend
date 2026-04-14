@@ -17,9 +17,14 @@ type Global struct {
 	Port     int    `yaml:"port"`
 }
 
+type Database struct {
+	DSN string `yaml:"dsn"`
+}
+
 type Config struct {
 	Global    Global     `yaml:"global"`
 	Neighbors []Neighbor `yaml:"neighbors"`
+	Database  Database   `yaml:"database"`
 }
 
 func LoadConfig(path string) (*Config, error) {

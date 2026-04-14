@@ -26,7 +26,7 @@ func (s *Server) handlePrefix(w http.ResponseWriter, r *http.Request) {
 	}
 
 	subResources := map[string]bool{
-		"routes": true, "peers": true, "upstreams": true, "downstreams": true,
+		"routes": true, "peers": true, "upstreams": true, "downstreams": true, "graph": true,
 	}
 
 	var prefix, subResource string
@@ -80,6 +80,15 @@ func (s *Server) handlePrefix(w http.ResponseWriter, r *http.Request) {
 			"count":        len(subs),
 			"sub_prefixes": subs,
 		})
+
+	case "graph":
+		graph, ok := s.handler.GetPrefixGraph(prefix)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "prefix not found"})
+			return
+		}
+		json.NewEncoder(w).Encode(graph)
 
 	default:
 		summary, ok := s.handler.GetPrefixSummary(prefix)
