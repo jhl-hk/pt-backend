@@ -1,145 +1,78 @@
-# Player Tools Backend
+# PT-Backend: BGP Collector & Prefix Analyzer
 
-BGP routing data aggregation microservice for AS215172 (MOEDOVE).
+基于 [GoBGP](https://github.com/osrg/gobgp) 开发的高性能 BGP 收集器与前缀分析工具。本项目参考了 [bgp.tools](https://bgp.tools/kb/what-is-a-upstream) 的逻辑，自动识别 BGP 路径中的 Tier 1 提供商、上游 (Upstream) 链路及起源 AS (Origin AS)。
 
-## Environment
+## 🚀 核心功能
 
-Create a `.env` file in the project root:
+- **实时监听**: 基于 GoBGP 嵌入式服务器，实时获取 BGP Update 报文。
+- **路径分析**:
+    - **Tier 1 识别**: 自动匹配全球核心 Tier 1 运营商 (如 NTT, Cogent, GTT 等)。
+    - **上游判定**: 根据 `bgp.tools` 标准，识别 Tier 1 与 Origin 之间的中转 AS 为上游。
+    - **起源提取**: 准确识别路由的原始发布者 (Origin AS)。
+- **模块化架构**: 清晰的代码分层（BGP 处理、数据库、Web 接口、业务逻辑）。
+- **REST API**: 提供接口供外部调用分析后的前缀数据。
 
-```dotenv
-host=
-user=
-private_key=
-DATABASE_URL=postgres://user:password@localhost:5432/dbname?sslmode=disable
+## 🏗 项目结构
+
+```text
+/
+├── main.go           # 项目入口，负责模块初始化与启动
+├── bgp/              # BGP 核心模块
+│   ├── server.go     # GoBGP 服务器管理 (启动、邻居配置)
+│   ├── analyzer.go   # BGP 路径核心分析逻辑 (Tier 1 & Upstream)
+│   └── analyzer_test.go # 分析逻辑单元测试
+├── handler/          # 业务处理层
+│   └── bgp_handler.go # 监听 BGP 事件并协调分析与存储
+├── db/               # 数据持久化层
+│   └── db.go         # 数据库连接与操作 (待扩展)
+└── web/              # Web 服务层
+    └── server.go     # REST API 接口定义
 ```
 
-## Prerequisites
+## 🛠 技术栈
 
-- A running PostgreSQL instance
-- SSH access to the BIRD router at the configured host
-- `asns` and `output` data files (fetched automatically on startup)
+- **语言**: Go 1.26+
+- **BGP 库**: [osrg/gobgp/v3](https://github.com/osrg/gobgp)
+- **协议**: gRPC (内部使用), BGP, HTTP
 
-## Build & Run
+## 🚦 快速开始
 
+### 1. 环境准备
+确保已安装 Go 环境并下载依赖：
 ```bash
-# Build
-go build -o pt-backend ./
+go mod tidy
+```
 
-# Run
+### 2. 运行程序
+```bash
 go run main.go
 ```
 
-## API
+- **BGP 监听**: 默认监听 `179` 端口（标准 BGP 端口，运行需 `sudo` 权限）。
+- **Web API**: 默认运行在 `http://localhost:8080`。
 
-### `GET /api/v1/asn/{asn}`
-
-Basic AS metadata: name, country, org, relationships, and prefix count statistics. No prefix list.
-
-```json
-{
-  "asn": 12345,
-  "name": "ACME Network",
-  "short": "ACME",
-  "country": "DE",
-  "website": "https://example.com",
-  "tags": "1,2",
-  "comments": "",
-  "org": { "handle": "ORG-ACME-RIPE", "name": "ACME Corp" },
-  "sponsor_org": { "handle": "ORG-SPONSOR-RIPE", "name": "Big ISP" },
-  "relationships": { "peers": [...], "upstreams": [...], "downstreams": [...] },
-  "prefix_count": 4,
-  "v4_count": 3,
-  "v6_count": 1,
-  "v4_size": 2,
-  "v6_size": 1
-}
+### 3. 配置 BGP 邻居
+在 `main.go` 中添加您的邻居信息：
+```go
+collector.AddNeighbor(ctx, "192.168.1.1", 65001)
 ```
 
----
+## 🔍 分析逻辑说明
 
-### `GET /api/v1/whois/{asn}`
+本项目遵循 **bgp.tools** 的上游判定准则：
+- **Tier 1 定义**: 包含 AS174, AS1299, AS2914, AS3356 等 13 个核心自治系统。
+- **Upstream 判断**: 在 `AS_PATH` 中，任何位于 Tier 1 AS 和 Origin AS 之间的 ASN 都被视为上游。
+- **示例**: 路径为 `[Peer, 2914 (Tier1), 4809 (CN2), 4134 (Chinatelecom), Origin]`
+    - **Tier 1**: AS2914 (NTT)
+    - **Origin**: `Origin`
+    - **Upstream Chain**: `[AS2914, AS4809, AS4134]`
+    - **Direct Upstream**: `AS4134`
 
-Raw `aut-num` WHOIS block from RIPE DB, returned as `text/plain`.
-
----
-
-### `GET /api/v1/cidr/{asn}`
-
-Full prefix list with BGP paths for the given origin ASN.
-
-```json
-{
-  "asn": 12345,
-  "prefixes": [
-    { "prefix": "1.2.3.0/24", "paths": [[215172, 44324, 12345]] },
-    { "prefix": "2001:db8::/48", "paths": [[215172, 44324, 12345]] }
-  ]
-}
+## 🧪 运行测试
+验证分析逻辑是否准确：
+```bash
+go test -v ./bgp/...
 ```
 
-IPv4 prefixes are listed before IPv6, sorted numerically within each family.
-
----
-
-### `GET /api/v1/tag/{tag}`
-
-All ASNs that carry the given tag ID.
-
-```json
-{
-  "tag": "1",
-  "asns": [
-    { "asn": 215172, "name": "MOEDOVE", "short": "MD", "country": "GB", "tags": "1,2" }
-  ]
-}
-```
-
----
-
-### `GET /api/v1/prefixes/count`
-
-Total number of prefixes tracked.
-
-```json
-{ "prefix_count": 8192 }
-```
-
----
-
-### `GET /api/v1/rank/prefix`
-
-Top 100 ASNs ranked by IPv4 and IPv6 prefix space (deduplicated, non-covered).
-
-### `GET /api/v1/rank/downstream`
-
-Top 100 ASNs by downstream customer count.
-
-### `GET /api/v1/rank/peer`
-
-Top 100 ASNs by peer count.
-
-### `GET /api/v1/rank/ascone`
-
-Top 100 ASNs by customer cone size.
-
-## Database
-
-The `asns` table is created automatically on startup (`IF NOT EXISTS`).
-
-| Column         | Type        | Description                                      |
-|----------------|-------------|--------------------------------------------------|
-| `id`           | int (PK)    | ASN number                                       |
-| `name`         | text        | Display name (manual)                            |
-| `short`        | text        | Short name / abbreviation (manual)               |
-| `country`      | text        | ISO 3166-1 alpha-2, synced from RIPE DB          |
-| `website`      | text        | Website URL (manual)                             |
-| `org`          | text        | RIPE org handle                                  |
-| `org_name`     | text        | RIPE org name                                    |
-| `sponsor_org`  | text        | Sponsoring org handle                            |
-| `sponsor_name` | text        | Sponsoring org name                              |
-| `tags`         | text        | Comma-separated tag IDs, e.g. `"1,2,3"` (manual) |
-| `comments`     | text        | Free-form notes (manual)                         |
-| `whois`        | text        | Raw `aut-num` block from RIPE DB                 |
-| `updated_at`   | timestamptz | Last sync time                                   |
-
-Manual fields (`name`, `short`, `website`, `tags`, `comments`) are **never overwritten** by the RIPE DB sync.
+## 📄 开源协议
+[MIT License](LICENSE)

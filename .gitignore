@@ -1,3 +1,44 @@
-.env
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# IDE - JetBrains
+.idea/
+*.iwu
+*.iws
+
+# IDE - VS Code
+.vscode/
+
+# OS generated files
 .DS_Store
-./temp/
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project specific
+pt-backend
+main
+*.log
+
+# Sensitive config (uncomment if you want to use a template instead)
+# config.yaml
