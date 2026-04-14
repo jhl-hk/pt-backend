@@ -3,6 +3,7 @@ package bgp
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	api "github.com/osrg/gobgp/v3/api"
 	"github.com/osrg/gobgp/v3/pkg/apiutil"
@@ -26,25 +27,28 @@ var Tier1ASNs = map[uint32]string{
 }
 
 type PrefixAnalysis struct {
-	Prefix      string
-	IsWithdraw  bool
-	ASPath      []uint32
-	NextHop     string
-	Communities []uint32
-	Origin      string
-	Neighbor    string
+	Prefix      string    `json:"prefix"`
+	IsWithdraw  bool      `json:"is_withdraw,omitempty"`
+	ASPath      []uint32  `json:"as_path"`
+	NextHop     string    `json:"next_hop"`
+	Communities []uint32  `json:"communities"`
+	Origin      string    `json:"origin"`
+	Neighbor    string    `json:"peer"`
+	PeerASN     uint32    `json:"peer_asn"`
+	ReceivedAt  time.Time `json:"received_at"`
 
 	// Specific to bgp.tools logic
-	OriginAS       uint32
-	DirectUpstream uint32   // The AS that provides transit to the origin
-	UpstreamChain  []uint32 // All ASNs between Tier 1 and Origin
-	Tier1Found     uint32   // The Tier 1 provider identified in the path
+	OriginAS       uint32   `json:"origin_as"`
+	DirectUpstream uint32   `json:"direct_upstream"`
+	UpstreamChain  []uint32 `json:"upstream_chain"`
+	Tier1Found     uint32   `json:"tier1,omitempty"`
 }
 
 func AnalyzePath(path *api.Path) (*PrefixAnalysis, error) {
 	analysis := &PrefixAnalysis{
 		IsWithdraw: path.IsWithdraw,
 		Neighbor:   path.NeighborIp,
+		ReceivedAt: time.Now(),
 	}
 
 	// NLRI
@@ -96,9 +100,9 @@ func AnalyzePath(path *api.Path) (*PrefixAnalysis, error) {
 	// Logic from bgp.tools:
 	// If a Tier 1 ASN appears in a path, any ASN between that Tier 1 and the originating ASN is classified as an upstream.
 	if len(analysis.ASPath) > 0 {
+		analysis.PeerASN = analysis.ASPath[0]
 		analysis.OriginAS = analysis.ASPath[len(analysis.ASPath)-1]
 
-		// Find the Tier 1 ASN in the path (taking the first one found from the neighbor side)
 		tier1Index := -1
 		for i, asn := range analysis.ASPath {
 			if _, ok := Tier1ASNs[asn]; ok {
@@ -109,24 +113,13 @@ func AnalyzePath(path *api.Path) (*PrefixAnalysis, error) {
 		}
 
 		if tier1Index != -1 {
-			// Upstreams are ASNs between tier1Index and len-1
-			// e.g. path=[N, T1, A, B, O]
-			// T1 is index 1. O is index 4.
-			// ASNs A (index 2) and B (index 3) are upstreams.
-			// B is the direct upstream for O.
-			// A is the direct upstream for B.
-			// T1 is the direct upstream for A.
-
 			for j := tier1Index + 1; j < len(analysis.ASPath); j++ {
 				analysis.UpstreamChain = append(analysis.UpstreamChain, analysis.ASPath[j-1])
-				// The ASN at j is being "upstreamed" by the ASN at j-1
 			}
-
 			if len(analysis.ASPath) > 1 {
 				analysis.DirectUpstream = analysis.ASPath[len(analysis.ASPath)-2]
 			}
 		} else if len(analysis.ASPath) > 1 {
-			// If no Tier 1 found, we still identify the direct upstream for the origin
 			analysis.DirectUpstream = analysis.ASPath[len(analysis.ASPath)-2]
 		}
 	}

@@ -35,7 +35,7 @@ func main() {
 	bgpHandler := handler.NewBGPHandler(collector)
 
 	// 5. Initialize Web Server
-	webServer := web.NewServer(8080)
+	webServer := web.NewServer(8080, bgpHandler)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

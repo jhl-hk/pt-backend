@@ -3,6 +3,7 @@ package bgp
 import (
 	"context"
 	"fmt"
+	"log"
 
 	api "github.com/osrg/gobgp/v3/api"
 	"github.com/osrg/gobgp/v3/pkg/server"
@@ -76,7 +77,9 @@ func (c *Collector) WatchEvents(ctx context.Context, handlePath func(*api.Path))
 		Table: &api.WatchEventRequest_Table{
 			Filters: []*api.WatchEventRequest_Table_Filter{
 				{
-					Type: api.WatchEventRequest_Table_Filter_BEST,
+					// ADJIN captures all per-peer path updates (route collector mode).
+					// Use BEST instead if you only want the single best path per prefix.
+					Type: api.WatchEventRequest_Table_Filter_ADJIN,
 				},
 			},
 		},
@@ -94,4 +97,27 @@ func (c *Collector) WatchEvents(ctx context.Context, handlePath func(*api.Path))
 	}
 
 	return nil
+}
+
+// GetAllPathsForPrefix queries the adj-in RIB across all neighbors for a single prefix.
+// This provides a live, comprehensive view of all received paths for that prefix.
+func (c *Collector) GetAllPathsForPrefix(ctx context.Context, prefix string) ([]*api.Path, error) {
+	neighbors, err := c.ListNeighbors(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list neighbors: %w", err)
+	}
+
+	var allPaths []*api.Path
+	for neighborAddr := range neighbors {
+		if err := c.server.ListPath(ctx, &api.ListPathRequest{
+			TableType: api.TableType_ADJ_IN,
+			Name:      neighborAddr,
+			Prefixes:  []*api.TableLookupPrefix{{Prefix: prefix}},
+		}, func(dest *api.Destination) {
+			allPaths = append(allPaths, dest.Paths...)
+		}); err != nil {
+			log.Printf("ListPath adj-in for neighbor %s prefix %s: %v", neighborAddr, prefix, err)
+		}
+	}
+	return allPaths, nil
 }
