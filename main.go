@@ -82,21 +82,21 @@ func syncNeighbors(ctx context.Context, c *bgp.Collector, target []config.Neighb
 		return
 	}
 
-	targetMap := make(map[string]uint32)
+	targetMap := make(map[string]config.Neighbor)
 	for _, n := range target {
-		targetMap[n.Address] = n.ASN
+		targetMap[n.Address] = n
 	}
 
 	// 1. Add or Update
-	for addr, asn := range targetMap {
-		if curASN, exists := current[addr]; !exists || curASN != asn {
+	for addr, n := range targetMap {
+		if curASN, exists := current[addr]; !exists || curASN != n.ASN {
 			if exists {
-				log.Printf("Updating neighbor %s (AS%d -> AS%d)", addr, curASN, asn)
+				log.Printf("Updating neighbor %s (AS%d -> AS%d)", addr, curASN, n.ASN)
 				c.DeleteNeighbor(ctx, addr)
 			} else {
-				log.Printf("Adding new neighbor %s (AS%d)", addr, asn)
+				log.Printf("Adding new neighbor %s (AS%d, multihop=%v)", addr, n.ASN, n.Multihop)
 			}
-			if err := c.AddNeighbor(ctx, addr, asn); err != nil {
+			if err := c.AddNeighbor(ctx, addr, n.ASN, n.Multihop); err != nil {
 				log.Printf("Failed to add/update neighbor %s: %v", addr, err)
 			}
 		}

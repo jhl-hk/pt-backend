@@ -35,12 +35,25 @@ func (c *Collector) Start(ctx context.Context, asn uint32, routerID string) erro
 	return nil
 }
 
-func (c *Collector) AddNeighbor(ctx context.Context, addr string, asn uint32) error {
+func (c *Collector) AddNeighbor(ctx context.Context, addr string, asn uint32, multihop bool) error {
 	peer := &api.Peer{
 		Conf: &api.PeerConf{
 			NeighborAddress: addr,
 			PeerAsn:         asn,
 		},
+		// Reject all exports: this is a route collector — we receive, never send.
+		ApplyPolicy: &api.ApplyPolicy{
+			ExportPolicy: &api.PolicyAssignment{
+				DefaultAction: api.RouteAction_REJECT,
+			},
+		},
+	}
+
+	if multihop {
+		peer.EbgpMultihop = &api.EbgpMultihop{
+			Enabled:     true,
+			MultihopTtl: 255,
+		}
 	}
 
 	if err := c.server.AddPeer(ctx, &api.AddPeerRequest{

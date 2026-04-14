@@ -6,8 +6,9 @@ import (
 )
 
 type Neighbor struct {
-	Address string `yaml:"address"`
-	ASN     uint32 `yaml:"asn"`
+	Address  string `yaml:"address"`
+	ASN      uint32 `yaml:"asn"`
+	Multihop bool   `yaml:"multihop"`
 }
 
 type Global struct {
