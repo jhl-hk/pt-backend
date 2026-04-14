@@ -41,4 +41,4 @@ main
 *.log
 
 # Sensitive config (uncomment if you want to use a template instead)
-# config.yaml
+config.yaml

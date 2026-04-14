@@ -60,26 +60,26 @@ func (h *BGPHandler) GetPrefixRoutes(prefix string) []*bgp.PrefixAnalysis {
 	return routes
 }
 
-// GetPrefixPeers returns the ASNs of all BGP peers announcing the given prefix.
+// GetPrefixPeers returns the BGP peers of the OriginAS for the given prefix —
+// adjacent ASNs in collected AS paths that are neither upstreams nor downstreams.
 func (h *BGPHandler) GetPrefixPeers(prefix string) []uint32 {
 	h.mu.RLock()
 	peerMap, ok := h.store[prefix]
-	h.mu.RUnlock()
-
-	set := make(map[uint32]struct{})
+	var originAS uint32
 	if ok {
 		for _, a := range peerMap {
-			if a.PeerASN != 0 {
-				set[a.PeerASN] = struct{}{}
+			if a.OriginAS != 0 {
+				originAS = a.OriginAS
+				break
 			}
 		}
 	}
-	out := make([]uint32, 0, len(set))
-	for asn := range set {
-		out = append(out, asn)
+	h.mu.RUnlock()
+
+	if !ok || originAS == 0 {
+		return make([]uint32, 0)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
+	return h.GetASNPeers(originAS)
 }
 
 // GetSubPrefixes returns all more-specific (downstream) prefixes contained within prefix.

@@ -4,13 +4,13 @@ import "sort"
 
 // ASNSummary is the aggregated view of an ASN derived from the route store.
 type ASNSummary struct {
-	ASN             uint32   `json:"asn"`
-	PrefixCount     int      `json:"prefix_count"`
-	Prefixes        []string `json:"prefixes"`
-	Upstreams       []uint32 `json:"upstreams"`
-	Tier1ASes       []uint32 `json:"tier1_ases,omitempty"`
-	Downstreams     []uint32 `json:"downstreams"`
-	AnnouncingPeers []uint32 `json:"announcing_peers"`
+	ASN         uint32   `json:"asn"`
+	PrefixCount int      `json:"prefix_count"`
+	Prefixes    []string `json:"prefixes"`
+	Upstreams   []uint32 `json:"upstreams"`
+	Tier1ASes   []uint32 `json:"tier1_ases,omitempty"`
+	Downstreams []uint32 `json:"downstreams"`
+	Peers       []uint32 `json:"peers"`
 }
 
 // GetASNSummary returns an aggregated summary for an ASN derived from the route store.
@@ -23,15 +23,12 @@ func (h *BGPHandler) GetASNSummary(asn uint32) (*ASNSummary, bool) {
 	upstreamSet := make(map[uint32]struct{})
 	tier1Set := make(map[uint32]struct{})
 	downstreamSet := make(map[uint32]struct{})
-	peerSet := make(map[uint32]struct{})
+	adjacentSet := make(map[uint32]struct{})
 
 	for prefix, peerMap := range h.store {
 		for _, a := range peerMap {
 			if a.OriginAS == asn {
 				prefixSet[prefix] = struct{}{}
-				if a.PeerASN != 0 {
-					peerSet[a.PeerASN] = struct{}{}
-				}
 				if a.DirectUpstream != 0 {
 					upstreamSet[a.DirectUpstream] = struct{}{}
 				}
@@ -42,10 +39,22 @@ func (h *BGPHandler) GetASNSummary(asn uint32) (*ASNSummary, bool) {
 					tier1Set[a.Tier1Found] = struct{}{}
 				}
 			}
-			// Collect downstreams: routes where asn is in the upstream chain
+			// Downstreams: routes where asn is in the upstream chain
 			for _, u := range a.UpstreamChain {
 				if u == asn && a.OriginAS != asn {
 					downstreamSet[a.OriginAS] = struct{}{}
+				}
+			}
+			// Adjacent ASNs in every path containing asn
+			for i, pathASN := range a.ASPath {
+				if pathASN == asn {
+					if i > 0 {
+						adjacentSet[a.ASPath[i-1]] = struct{}{}
+					}
+					if i < len(a.ASPath)-1 {
+						adjacentSet[a.ASPath[i+1]] = struct{}{}
+					}
+					break
 				}
 			}
 		}
@@ -55,14 +64,29 @@ func (h *BGPHandler) GetASNSummary(asn uint32) (*ASNSummary, bool) {
 		return nil, false
 	}
 
+	// Peers = adjacent ASNs that are neither upstreams, downstreams, nor self
+	peerSet := make(map[uint32]struct{})
+	for adj := range adjacentSet {
+		if adj == asn {
+			continue
+		}
+		if _, ok := upstreamSet[adj]; ok {
+			continue
+		}
+		if _, ok := downstreamSet[adj]; ok {
+			continue
+		}
+		peerSet[adj] = struct{}{}
+	}
+
 	s := &ASNSummary{
-		ASN:             asn,
-		PrefixCount:     len(prefixSet),
-		Prefixes:        make([]string, 0, len(prefixSet)),
-		Upstreams:       make([]uint32, 0, len(upstreamSet)),
-		Tier1ASes:       make([]uint32, 0, len(tier1Set)),
-		Downstreams:     make([]uint32, 0, len(downstreamSet)),
-		AnnouncingPeers: make([]uint32, 0, len(peerSet)),
+		ASN:         asn,
+		PrefixCount: len(prefixSet),
+		Prefixes:    make([]string, 0, len(prefixSet)),
+		Upstreams:   make([]uint32, 0, len(upstreamSet)),
+		Tier1ASes:   make([]uint32, 0, len(tier1Set)),
+		Downstreams: make([]uint32, 0, len(downstreamSet)),
+		Peers:       make([]uint32, 0, len(peerSet)),
 	}
 	for p := range prefixSet {
 		s.Prefixes = append(s.Prefixes, p)
@@ -77,13 +101,13 @@ func (h *BGPHandler) GetASNSummary(asn uint32) (*ASNSummary, bool) {
 		s.Downstreams = append(s.Downstreams, d)
 	}
 	for p := range peerSet {
-		s.AnnouncingPeers = append(s.AnnouncingPeers, p)
+		s.Peers = append(s.Peers, p)
 	}
 	sort.Strings(s.Prefixes)
 	sort.Slice(s.Upstreams, func(i, j int) bool { return s.Upstreams[i] < s.Upstreams[j] })
 	sort.Slice(s.Tier1ASes, func(i, j int) bool { return s.Tier1ASes[i] < s.Tier1ASes[j] })
 	sort.Slice(s.Downstreams, func(i, j int) bool { return s.Downstreams[i] < s.Downstreams[j] })
-	sort.Slice(s.AnnouncingPeers, func(i, j int) bool { return s.AnnouncingPeers[i] < s.AnnouncingPeers[j] })
+	sort.Slice(s.Peers, func(i, j int) bool { return s.Peers[i] < s.Peers[j] })
 	return s, true
 }
 
@@ -163,22 +187,61 @@ func (h *BGPHandler) GetASNDownstreams(asn uint32) []uint32 {
 	return out
 }
 
-// GetASNPeers returns the ASNs of BGP peers announcing prefixes originated by the given ASN.
+// GetASNPeers returns ASNs that are BGP peers of the given ASN — adjacent in collected
+// AS paths but not in a transit relationship (neither upstream nor downstream).
 func (h *BGPHandler) GetASNPeers(asn uint32) []uint32 {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	set := make(map[uint32]struct{})
+	upstreamSet := make(map[uint32]struct{})
+	downstreamSet := make(map[uint32]struct{})
+	adjacentSet := make(map[uint32]struct{})
+
 	for _, peerMap := range h.store {
 		for _, a := range peerMap {
-			if a.OriginAS == asn && a.PeerASN != 0 {
-				set[a.PeerASN] = struct{}{}
+			// Build upstream set for asn
+			if a.OriginAS == asn {
+				if a.DirectUpstream != 0 {
+					upstreamSet[a.DirectUpstream] = struct{}{}
+				}
+				for _, u := range a.UpstreamChain {
+					upstreamSet[u] = struct{}{}
+				}
+			}
+			// Build downstream set for asn
+			for _, u := range a.UpstreamChain {
+				if u == asn && a.OriginAS != asn {
+					downstreamSet[a.OriginAS] = struct{}{}
+					break
+				}
+			}
+			// Collect ASNs directly adjacent to asn in this path
+			for i, pathASN := range a.ASPath {
+				if pathASN == asn {
+					if i > 0 {
+						adjacentSet[a.ASPath[i-1]] = struct{}{}
+					}
+					if i < len(a.ASPath)-1 {
+						adjacentSet[a.ASPath[i+1]] = struct{}{}
+					}
+					break
+				}
 			}
 		}
 	}
-	out := make([]uint32, 0, len(set))
-	for p := range set {
-		out = append(out, p)
+
+	out := make([]uint32, 0)
+	for adj := range adjacentSet {
+		if adj == asn {
+			continue
+		}
+		if _, ok := upstreamSet[adj]; ok {
+			continue
+		}
+		if _, ok := downstreamSet[adj]; ok {
+			continue
+		}
+		out = append(out, adj)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
